@@ -181,8 +181,8 @@ func (parser *Parser) toDB(logRes *RPCLogRes) {
 		// base 用0，会自动识别
 		transfer.SetString(result.Data, 0)
 
-		fromAddress := result.Topics[1]
-		toAddress := result.Topics[2]
+		fromAddress := tools.AddressFormat(result.Topics[1])
+		toAddress := tools.AddressFormat(result.Topics[2])
 
 		// 读取当前余额，没有默认使用0
 		fromBalance, err := parser.getLatestBalance(fromAddress)
