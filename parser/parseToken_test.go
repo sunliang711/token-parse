@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"testing"
 	"token-parse/config"
+	"token-parse/db"
 
 	"github.com/spf13/viper"
 )
@@ -12,10 +13,10 @@ func TestParseTransferEvent(t *testing.T) {
 	cfg := `
 tokens:
   -
-    chain: eth-main
+    chain: ETH1.0-Main
     rpc: https://mainnet.infura.io/v3/f26e9265123241a4ba22cb9188089fe5
     rpc1: http://10.1.9.20:8545
-    name: USDT
+    token_name: USDT
     from_block2: 11538392
     from_block:  7534749
     block_step: 5
@@ -34,13 +35,10 @@ tokens:
 		t.Fatalf("UnmarshalKey error: %v", err)
 	}
 	t.Logf("tokens: %+v", tokens)
-	//err = parseTransferEvent(&tokens[0])
-	//if err != nil {
-	//	t.Logf("parse error: %v", err)
-	//}
 
-
-	parser := New("debug",&tokens[0],"root:root@tcp(127.0.0.1:3306)/tmt?charset=utf8mb4&parseTime=true&loc=Local")
+	//parser := New("debug",&tokens[0],"root:root@tcp(127.0.0.1:3306)/tmt?charset=utf8mb4&parseTime=true&loc=Local")
+	dbOp := db.InitDB("debug", "root:root@tcp(127.0.0.1:3306)/tmt?charset=utf8mb4&parseTime=true&loc=Local")
+	parser := New(&tokens[0], dbOp, nil)
 	parser.Start()
 
 }

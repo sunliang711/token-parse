@@ -3,10 +3,11 @@ package db
 import "time"
 
 type BalanceDAO struct {
+	TokenName        string `gorm:"primaryKey;size:100;"`
+	ContractAddress  string `gorm:"size:100;"`
 	BlockHash        string `gorm:"size:100;"`
 	BlockNumber      uint   `gorm:"primaryKey;"`
 	LogIndex         uint   `gorm:"primaryKey;"`
-	ContractAddress  string `gorm:"size:100;"`
 	TransactionHash  string `gorm:"size:100;"`
 	TransactionIndex uint   `gorm:"size:100;"`
 	Address          string `gorm:"primaryKey;size:100;"`

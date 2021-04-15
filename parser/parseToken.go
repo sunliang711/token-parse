@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/sirupsen/logrus"
 	"gorm.io/gorm"
 	"math/big"
 	"net/http"
+	"sync"
 	"time"
 	"token-parse/config"
 	"token-parse/db"
@@ -77,65 +79,10 @@ type LogRes struct {
 // RPC request format:
 // curl -X POST --data '{"jsonrpc":"2.0","method":"eth_getLogs","params":[{"topics":["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"],"fromBlock":"0xB00FD8","address":"0x6e1A19F235bE7ED8E3369eF73b196C07257494DE"}],"id":74}'
 
-func parseTransferEvent(cfg *config.TokenConfig) error {
-	// new HTTP client
-	client := http.Client{
-		Timeout: time.Duration(time.Second * time.Duration(cfg.Timeout)),
-	}
-
-	// 组装eth_getLogs参数
-	logParam := LogParam{
-		Topics:    []string{transferEventTopic},
-		FromBlock: fmt.Sprintf("%d", cfg.FromBlock),
-		ToBlock:   fmt.Sprintf("%d", cfg.FromBlock),
-		Address:   cfg.Address,
-	}
-	rpcID := uint(1)
-	// 构建完整的json rpc参数
-	rpcReq := RPCReq{
-		JSONRPC: "2.0",
-		Method:  methodGetLogs,
-		ID:      rpcID,
-		Params:  []interface{}{&logParam},
-	}
-	bs, err := json.Marshal(&rpcReq)
-	if err != nil {
-		return fmt.Errorf("Marshal request body error: %v", err)
-	}
-	fmt.Printf("Request body: %s\n", bs)
-
-	// 构建HTTP请求
-	req, err := http.NewRequest("POST", cfg.RPC, bytes.NewBuffer(bs))
-	if err != nil {
-		return fmt.Errorf("New http request error: %v", err)
-	}
-	req.Header.Add("Content-Type", "application/json")
-
-	fmt.Printf("request URI: %v\n", req.URL)
-
-	// 发送rpc调用
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("Call rpc error: %v", err)
-	}
-	defer resp.Body.Close()
-
-	// 解析结果
-	var rpcRes RPCLogRes
-	err = json.NewDecoder(resp.Body).Decode(&rpcRes)
-	if err != nil {
-		return fmt.Errorf("Decode response error: %v", err)
-	}
-	if rpcRes.ID != rpcID {
-		return fmt.Errorf("jsonrpc id not match")
-	}
-	fmt.Printf("rpcRes: %+v\n", rpcRes)
-	return nil
-}
-
 type Parser struct {
 	Config      *config.TokenConfig
 	ChQuit      chan struct{}
+	Wg          *sync.WaitGroup
 	DBOp        *gorm.DB
 	HTTPClient  *http.Client
 	ChRPCLogRes chan *RPCLogRes
@@ -145,11 +92,11 @@ const (
 	chanSize = 20
 )
 
-func New(mode string, cfg *config.TokenConfig, dbSource string) *Parser {
-	dbOp := db.InitDB(mode, dbSource)
+func New(cfg *config.TokenConfig, dbOp *gorm.DB, wg *sync.WaitGroup) *Parser {
 	return &Parser{
 		Config: cfg,
 		ChQuit: make(chan struct{}),
+		Wg:     wg,
 		DBOp:   dbOp,
 		HTTPClient: &http.Client{
 			Timeout: time.Second * time.Duration(cfg.Timeout),
@@ -167,13 +114,12 @@ func (parser *Parser) Start() {
 		parser.Stop()
 		return
 	}
-	fmt.Printf("From block: %v\n", fromBlock)
+	fmt.Printf("%s From block: %v\n", parser.Config.TokenName, fromBlock)
 	go parser.receiveLog()
 
 	for {
 		select {
 		case <-parser.ChQuit:
-			parser.stopAll()
 			return
 		case <-workTicker:
 			parser.fetchBlock(fromBlock, parser.Config.BlockStep)
@@ -190,6 +136,7 @@ func (parser *Parser) receiveLog() {
 	for {
 		select {
 		case <-parser.ChQuit:
+			parser.stopAll()
 			return
 		case logRes := <-parser.ChRPCLogRes:
 			parser.toDB(logRes)
@@ -240,14 +187,14 @@ func (parser *Parser) toDB(logRes *RPCLogRes) {
 		// 读取当前余额，没有默认使用0
 		fromBalance, err := parser.getLatestBalance(fromAddress)
 		if err != nil {
-			fmt.Printf("get from balance error: %v", err)
+			logrus.Errorf("get sender balance error: %v", err)
 			return
 		}
 
 		// 读取当前余额，没有默认使用0
 		toBalance, err := parser.getLatestBalance(toAddress)
 		if err != nil {
-			fmt.Printf("get to balance error: %v", err)
+			logrus.Errorf("get receiver balance error: %v", err)
 			return
 		}
 
@@ -255,6 +202,7 @@ func (parser *Parser) toDB(logRes *RPCLogRes) {
 		toBalance.Add(toBalance, transfer)
 
 		newFromBalanceDAO := &db.BalanceDAO{
+			TokenName:        parser.Config.TokenName,
 			BlockHash:        blockHash,
 			BlockNumber:      uint(blockNumber),
 			LogIndex:         uint(logIndex),
@@ -266,6 +214,7 @@ func (parser *Parser) toDB(logRes *RPCLogRes) {
 		}
 
 		newToBalanceDAO := &db.BalanceDAO{
+			TokenName:        parser.Config.TokenName,
 			BlockHash:        blockHash,
 			BlockNumber:      uint(blockNumber),
 			LogIndex:         uint(logIndex),
@@ -294,7 +243,7 @@ func (parser *Parser) getLatestBalance(address string) (*big.Int, error) {
 	var balance db.BalanceDAO
 	addressBalance := big.NewInt(0)
 	// select * from db_balance  where address="addr2" order by block_number desc,log_index desc limit 1;
-	result := parser.DBOp.WithContext(tools.GetContextDefault()).Model(&db.BalanceDAO{}).Where("address = ? ", address).Order("block_number desc,log_index desc").First(&balance)
+	result := parser.DBOp.WithContext(tools.GetContextDefault()).Model(&db.BalanceDAO{}).Where("token_name = ? and address = ? ", parser.Config.TokenName, address).Order("block_number desc,log_index desc").First(&balance)
 	err := result.Error
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
@@ -312,13 +261,12 @@ func (parser *Parser) getLatestBalance(address string) (*big.Int, error) {
 }
 
 func (parser *Parser) fromBlock() (uint, error) {
-	// 如果数据库中有数据（不是第一次），那么把最高的block_number所有记录删除，
-	// 然后从这个block_number开始，因为，如果上次停止
-	// 扫描服务的时候，写入了一半的数据，会影响余额的准确性
+	// 如果数据库中有数据（不是第一次），那么把最大的block_number所有记录删除，
+	// 然后从这个block_number开始
 
 	var balance db.BalanceDAO
 	// get max block_number
-	result := parser.DBOp.WithContext(tools.GetContextDefault()).Model(&db.BalanceDAO{}).Order("block_number desc").First(&balance)
+	result := parser.DBOp.WithContext(tools.GetContextDefault()).Model(&db.BalanceDAO{}).Where("token_name = ? ", parser.Config.TokenName).Order("block_number desc").First(&balance)
 	err := result.Error
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
@@ -330,7 +278,7 @@ func (parser *Parser) fromBlock() (uint, error) {
 	}
 
 	// delete all record with block_number == balance.BlockNumber
-	result = parser.DBOp.WithContext(tools.GetContextDefault()).Where("block_number = ? ", balance.BlockNumber).Delete(&db.BalanceDAO{})
+	result = parser.DBOp.WithContext(tools.GetContextDefault()).Where("token_name = ? and block_number = ? ", parser.Config.TokenName, balance.BlockNumber).Delete(&db.BalanceDAO{})
 	err = result.Error
 	if err != nil {
 		return 0, fmt.Errorf("delete max block_number records error: %v", err)
@@ -340,13 +288,13 @@ func (parser *Parser) fromBlock() (uint, error) {
 }
 
 func (parser *Parser) fetchBlock(fromBlock uint, blockStep uint) error {
-	fmt.Printf("fetch block: %v step: %v\n", fromBlock, blockStep)
+	fmt.Printf("%s fetch block: %v step: %v\n", parser.Config.TokenName, fromBlock, blockStep)
 	// 组装eth_getLogs参数
 	logParam := LogParam{
 		Topics:    []string{transferEventTopic},
 		FromBlock: fmt.Sprintf("%#x", fromBlock),
 		ToBlock:   fmt.Sprintf("%#x", fromBlock+blockStep-1),
-		Address:   parser.Config.Address,
+		Address:   parser.Config.ContractAddress,
 	}
 	rpcID := uint(1)
 	// 构建完整的json rpc参数
@@ -394,9 +342,8 @@ func (parser *Parser) fetchBlock(fromBlock uint, blockStep uint) error {
 }
 
 func (parser *Parser) stopAll() {
-	d, err := parser.DBOp.DB()
-	if err != nil {
-		return
+	if parser.Wg != nil {
+		parser.Wg.Done()
+		logrus.Info("done")
 	}
-	d.Close()
 }
